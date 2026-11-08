@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f7a5a">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>レシート撮影</title>
+<style>
+  :root { --main:#1f7a5a; --warn:#c0392b; --orange:#e67e22; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:#000; color:#fff;
+    font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; overflow:hidden; }
+  button { font:inherit; border:0; cursor:pointer; }
+  .hidden { display:none !important; }
+
+  /* カメラ画面 */
+  #cam { position:fixed; inset:0; }
+  video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .guide { position:absolute; left:18%; right:18%; top:9%; bottom:27%;
+    border:2px dashed rgba(255,255,255,.7); border-radius:10px; pointer-events:none; }
+  .top { position:absolute; top:0; left:0; right:0; padding:12px 14px calc(12px + env(safe-area-inset-top));
+    display:flex; justify-content:space-between; align-items:center;
+    background:linear-gradient(rgba(0,0,0,.6),transparent); font-size:15px; }
+  .top button { background:rgba(255,255,255,.18); color:#fff; padding:8px 12px; border-radius:20px; font-size:14px; }
+  .toast { position:absolute; top:62px; left:50%; transform:translateX(-50%); max-width:90%;
+    padding:10px 16px; border-radius:20px; font-size:15px; text-align:center; background:rgba(31,122,90,.95); }
+  .toast.ng { background:rgba(192,57,43,.95); }
+  .bottom { position:absolute; left:0; right:0; bottom:0; padding:10px 14px calc(18px + env(safe-area-inset-bottom));
+    background:linear-gradient(transparent,rgba(0,0,0,.75)); }
+  .thumbs { display:flex; gap:6px; overflow-x:auto; min-height:64px; margin-bottom:12px; }
+  .th { position:relative; flex:none; }
+  .th img { height:60px; border-radius:6px; border:2px solid #fff; display:block; }
+  .th span { position:absolute; left:2px; bottom:2px; background:rgba(0,0,0,.7); font-size:11px; padding:1px 4px; border-radius:4px; }
+  .th.group img { border-color:#f1c40f; }
+  .controls { display:flex; align-items:center; justify-content:space-between; }
+  .side { width:96px; padding:12px 6px; border-radius:14px; font-size:13px; line-height:1.3;
+    background:rgba(255,255,255,.18); color:#fff; }
+  .side:disabled { opacity:.35; }
+  .send { background:var(--orange); font-weight:bold; font-size:15px; }
+  .shutter { width:78px; height:78px; border-radius:50%; background:#fff; border:6px solid rgba(255,255,255,.45);
+    background-clip:padding-box; }
+  .shutter:active { transform:scale(.92); }
+  .flash { position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .15s; }
+
+  /* 初回設定・エラー画面 */
+  .panel { position:fixed; inset:0; background:#f6f5f1; color:#222; overflow:auto; padding:24px 18px; }
+  .panel h1 { font-size:20px; margin:0 0 6px; }
+  .hint { font-size:14px; color:#666; line-height:1.6; }
+  .members { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:16px 0; }
+  .members button { padding:20px 8px; font-size:20px; background:#fff; border:2px solid #ccc; border-radius:14px; color:#222; }
+  .members button.on { border-color:var(--main); background:#e5f3ec; }
+  input[type=tel] { width:100%; font-size:22px; padding:12px; border:2px solid #ccc; border-radius:10px; letter-spacing:4px; text-align:center; }
+  .big { width:100%; padding:20px; font-size:20px; font-weight:bold; background:var(--main); color:#fff; border-radius:14px; margin-top:16px; }
+  .msg { margin-top:12px; padding:10px; border-radius:10px; text-align:center; }
+  .msg.ng { background:#fdecea; color:var(--warn); }
+  .msg.ok { background:#e5f3ec; color:var(--main); }
+</style>
+</head>
+<body>
+
+<!-- カメラ画面 -->
+<div id="cam" class="hidden">
+  <video id="video" playsinline muted autoplay></video>
+  <div class="guide"></div>
+  <div class="top">
+    <span id="who"></span>
+    <span>
+      <button id="torchBtn" class="hidden" onclick="toggleTorch()">💡ライト</button>
+      <button onclick="openSetup()">⚙</button>
+    </span>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <div class="bottom">
+    <div id="thumbs" class="thumbs"></div>
+    <div class="controls">
+      <button id="contBtn" class="side" onclick="shoot(false)" disabled>＋続き<br>（長いレシート）</button>
+      <button class="shutter" onclick="shoot(true)" aria-label="撮影"></button>
+      <button id="sendBtn" class="side send" onclick="sendAll()" disabled>送信</button>
+    </div>
+  </div>
+</div>
+<div id="flash" class="flash"></div>
+
+<!-- 初回設定 -->
+<div id="setup" class="panel hidden">
+  <h1>はじめに（1回だけ）</h1>
+  <div class="hint">撮る人を選んで、合言葉を入れてください。</div>
+  <div id="memberBtns" class="members"></div>
+  <input id="pass" type="tel" inputmode="numeric" placeholder="合言葉（数字6桁）">
+  <div id="setupMsg"></div>
+  <button class="big" onclick="saveSetup()">はじめる</button>
+</div>
+
+<!-- カメラが使えないとき -->
+<div id="noCam" class="panel hidden">
+  <h1>カメラを使えません</h1>
+  <div class="hint">ブラウザのカメラ許可がオフになっている可能性があります。<br>
+  Chromeのアドレスバー左の鍵マーク → 権限 → カメラ を「許可」にして、もう一度開いてください。<br><br>
+  それでも使えないときは、下のボタンで標準カメラから撮れます。</div>
+  <button class="big" onclick="$('file').click()">📷 標準カメラで撮る</button>
+  <button class="big" style="background:#888" onclick="startCamera()">もう一度カメラを起動</button>
+</div>
+<input id="file" type="file" accept="image/*" capture="environment" class="hidden">
+
+<script>
+// ====== 設定（ここだけ書き換え） ======
+var GAS_URL = 'ここにGASのウェブアプリURL（…/exec）を貼る';
+var MEMBERS = ['なむ', 'なお'];
+// =====================================
+var MAX_WIDTH = 1000, JPEG_QUALITY = 0.7, KEY = 'receiptCam.v1';
+
+var state = load() || { member: null, pass: null, receipts: [] };
+var stream = null, track = null, torchOn = false, sending = false, toastTimer = null;
+
+function $(id) { return document.getElementById(id); }
+function load() { try { return JSON.parse(localStorage.getItem(KEY)); } catch (e) { return null; } }
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(state)); return true; }
+  catch (e) { toast('スマホ内の一時保存がいっぱいです。先に送信してください', false); return false; }
+}
+function toast(text, ok) {
+  var t = $('toast'); t.textContent = text; t.className = 'toast' + (ok === false ? ' ng' : '');
+  clearTimeout(toastTimer); if (ok !== null) toastTimer = setTimeout(function () { t.classList.add('hidden'); }, 3500);
+}
+
+// ---------- 通信 ----------
+function post(body) {
+  return fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) { if (j.ok === false && j.error) throw new Error(j.error); return j; });
+}
+
+// ---------- 初回設定 ----------
+function openSetup() { stopCamera(); show('setup'); renderMembers(); if (state.pass) $('pass').value = state.pass; }
+function renderMembers() {
+  $('memberBtns').innerHTML = '';
+  MEMBERS.forEach(function (m) {
+    var b = document.createElement('button'); b.textContent = m;
+    if (state.member === m) b.className = 'on';
+    b.onclick = function () { state.member = m; renderMembers(); };
+    $('memberBtns').appendChild(b);
+  });
+}
+function saveSetup() {
+  var pass = $('pass').value.trim();
+  if (!state.member) return setupMsg('撮る人を選んでください', false);
+  setupMsg('確認中…', true);
+  post({ action: 'check', pass: pass }).then(function (j) {
+    if (!j.ok) return setupMsg('合言葉が違います', false);
+    state.pass = pass; save(); startCamera();
+  }).catch(function (e) { setupMsg(e.message.indexOf('停止') >= 0 ? e.message : '通信できません。電波を確認してください', false); });
+}
+function setupMsg(t, ok) { $('setupMsg').innerHTML = '<div class="msg ' + (ok ? 'ok' : 'ng') + '">' + t + '</div>'; }
+
+function show(id) {
+  ['cam', 'setup', 'noCam'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); });
+}
+
+// ---------- カメラ ----------
+function startCamera() {
+  show('cam');
+  $('who').textContent = state.member + ' さん';
+  render();
+  if (stream) return;
+  navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }
+  }).then(function (s) {
+    stream = s; track = s.getVideoTracks()[0];
+    $('video').srcObject = s;
+    try {
+      var cap = track.getCapabilities ? track.getCapabilities() : {};
+      $('torchBtn').classList.toggle('hidden', !cap.torch);
+      if (cap.focusMode && cap.focusMode.indexOf('continuous') >= 0)
+        track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
+    } catch (e) {}
+  }).catch(function () { show('noCam'); });
+}
+function stopCamera() {
+  if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+  stream = null; track = null; torchOn = false;
+}
+function toggleTorch() {
+  if (!track) return;
+  torchOn = !torchOn;
+  track.applyConstraints({ advanced: [{ torch: torchOn }] }).catch(function () { torchOn = false; });
+}
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) stopCamera();
+  else if (!$('cam').classList.contains('hidden')) startCamera();
+});
+
+// 撮影：静止画（高画質）を優先、使えなければ映像から切り出し
+function grab() {
+  if (track && window.ImageCapture) {
+    try {
+      var ic = new ImageCapture(track);
+      return ic.takePhoto().then(blobToImage).catch(frameFromVideo);
+    } catch (e) {}
+  }
+  return frameFromVideo();
+}
+function frameFromVideo() {
+  var v = $('video');
+  if (!v.videoWidth) return Promise.reject();
+  return Promise.resolve({ src: v, w: v.videoWidth, h: v.videoHeight });
+}
+function blobToImage(blob) {
+  return new Promise(function (resolve, reject) {
+    var url = URL.createObjectURL(blob), img = new Image();
+    img.onload = function () { resolve({ src: img, w: img.naturalWidth, h: img.naturalHeight, url: url }); };
+    img.onerror = function () { URL.revokeObjectURL(url); reject(); };
+    img.src = url;
+  });
+}
+// 縮小・JPEG圧縮
+function compress(o) {
+  var scale = Math.min(1, MAX_WIDTH / o.w);
+  var w = Math.round(o.w * scale), h = Math.round(o.h * scale);
+  var c = document.createElement('canvas'); c.width = w; c.height = h;
+  var ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(o.src, 0, 0, w, h);
+  if (o.url) URL.revokeObjectURL(o.url);
+  return c.toDataURL('image/jpeg', JPEG_QUALITY);
+}
+function addShot(dataUrl, isNew) {
+  if (isNew || !state.receipts.length) state.receipts.push({ id: stamp(new Date()), pages: [dataUrl] });
+  else state.receipts[state.receipts.length - 1].pages.push(dataUrl);
+  if (!save()) { // 保存できなければ取り消す
+    var r = state.receipts[state.receipts.length - 1];
+    if (r.pages.length > 1) r.pages.pop(); else state.receipts.pop();
+    return;
+  }
+  toast('撮影OK（' + Math.round(dataUrl.length * 0.75 / 1024) + 'KB）' + (isNew ? '' : '　続きとして追加'), true);
+  render();
+}
+function shoot(isNew) {
+  if (sending) return;
+  var f = $('flash'); f.style.opacity = .8; setTimeout(function () { f.style.opacity = 0; }, 120);
+  grab().then(function (o) { addShot(compress(o), isNew); })
+        .catch(function () { toast('撮影できませんでした。もう一度押してください', false); });
+}
+// 標準カメラで撮った場合
+$('file').addEventListener('change', function (e) {
+  var f = e.target.files && e.target.files[0]; if (!f) return;
+  blobToImage(f).then(function (o) { addShot(compress(o), true); show('cam'); $('who').textContent = state.member + ' さん'; render(); startCamera(); });
+  e.target.value = '';
+});
+function stamp(d) {
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+// ---------- 一覧 ----------
+function render() {
+  var box = $('thumbs'); box.innerHTML = '';
+  var total = 0;
+  state.receipts.forEach(function (r, i) {
+    r.pages.forEach(function (src, k) {
+      total++;
+      var d = document.createElement('div'); d.className = 'th' + (r.pages.length > 1 ? ' group' : '');
+      d.innerHTML = '<img><span>' + (i + 1) + (r.pages.length > 1 ? '-' + (k + 1) : '') + '</span>';
+      d.querySelector('img').src = src;
+      d.onclick = function () {
+        if (confirm('この写真を削除しますか？')) {
+          r.pages.splice(k, 1); if (!r.pages.length) state.receipts.splice(i, 1); save(); render();
+        }
+      };
+      box.appendChild(d);
+    });
+  });
+  box.scrollLeft = box.scrollWidth;
+  $('contBtn').disabled = !state.receipts.length || sending;
+  $('sendBtn').disabled = !state.receipts.length || sending;
+  if (!sending) $('sendBtn').innerHTML = '送信<br>' + state.receipts.length + '件';
+}
+
+// ---------- 送信 ----------
+function sendAll() {
+  if (sending || !state.receipts.length) return;
+  sending = true;
+  var jobs = [];
+  state.receipts.forEach(function (r) { r.pages.forEach(function (src, k) { jobs.push({ r: r, page: k + 1, src: src }); }); });
+  var done = 0;
+  (function next() {
+    if (done >= jobs.length) {
+      state.receipts = []; save(); sending = false;
+      toast('✅ 送信しました（' + jobs.length + '枚）', true); render(); return;
+    }
+    $('sendBtn').innerHTML = '送信中<br>' + (done + 1) + '/' + jobs.length;
+    render();
+    var j = jobs[done];
+    post({ pass: state.pass, member: state.member, receiptId: j.r.id, page: j.page, dataUrl: j.src })
+      .then(function () { done++; next(); })
+      .catch(function (e) {
+        sending = false;
+        var sent = jobs.slice(0, done);
+        state.receipts = state.receipts.filter(function (r) {
+          return sent.filter(function (s) { return s.r === r; }).length < r.pages.length;
+        });
+        save(); render();
+        var m = (e && e.message) || '';
+        if (m.indexOf('合言葉') >= 0) { state.pass = null; save(); openSetup(); setupMsg('合言葉が変わりました。入れ直してください', false); return; }
+        toast(m.indexOf('停止') >= 0 ? m : '送信できませんでした。電波の良い所でもう一度「送信」を押してください', false);
+      });
+  })();
+}
+
+// ---------- 起動 ----------
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
+if (state.member && state.pass) startCamera(); else openSetup();
+</script>
+</body>
+</html>
